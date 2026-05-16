@@ -25,14 +25,28 @@ public class MealTextParser {
 
         Map<String, String> result = new LinkedHashMap<>();
 
-        if (text == null || text.isBlank()) {
-            return result;
-        }
+        String[] lines = text.split("\\n");
 
-        result.put("breakfast", extract(text, "아침"));
-        result.put("lunch", extract(text, "점심"));
-        result.put("dinner", extract(text, "저녁"));
-        result.put("snack", extract(text, "간식"));
+        for (String line : lines) {
+
+            line = line.trim();
+
+            if (line.startsWith("아침")) {
+                result.put("breakfast", line.replace("아침", "").trim());
+            }
+
+            if (line.startsWith("점심")) {
+                result.put("lunch", line.replace("점심", "").trim());
+            }
+
+            if (line.startsWith("저녁")) {
+                result.put("dinner", line.replace("저녁", "").trim());
+            }
+
+            if (line.startsWith("간식")) {
+                result.put("snack", line.replace("간식", "").trim());
+            }
+        }
 
         return result;
     }

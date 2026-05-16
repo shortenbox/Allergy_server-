@@ -2,6 +2,7 @@ package com.example.allergy_server.controller;
 
 import com.example.allergy_server.service.MealService;
 import com.example.allergy_server.parser.MealTextParser;
+
 import com.example.allergy_server.external_ocr.OcrPicture;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
@@ -10,19 +11,32 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
- * ==========================================
+ * =========================================
  * OcrController
- * ==========================================
- * 이미지 기반 식단 분석 API 컨트롤러
- *
+ * =========================================
  * [역할]
- * - 이미지 업로드 처리
- * - OCR → MealService 연결
- * - 분석 결과 반환
+ * - OCR 기반 식단표 이미지 분석 API 처리
+ * - 이미지 업로드 및 OCR 결과 분석 수행
+ * - OCR 결과를 MealService와 연결
+ *
+ * [기능]
+ * - /api/meal/analyze/image
+ * - 이미지 파일 업로드 처리
+ * - Google Vision OCR 호출
+ * - 급식표 텍스트 분석
  *
  * [특징]
  * - 이미지 입력 전용 API
- * ==========================================
+ * - OCR 처리 흐름 담당
+ * - 식단표 형태 분석에 최적화
+ *
+ * [처리 흐름]
+ * 이미지 업로드
+ * → OCR 텍스트 추출
+ * → MealTextParser 분석
+ * → MealService 호출
+ * → 결과 JSON 반환
+ * =========================================
  */
 
 @RestController

@@ -1,9 +1,8 @@
-
-// 구글 Vision Api 분석
 package com.example.allergy_server.external_ocr;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 
@@ -18,52 +17,87 @@ import java.util.Base64;
  * OcrPicture
  * =========================================
  * [역할]
- * - 이미지 → 텍스트 변환 (OCR 처리)
+ * - OCR 통합 처리 서비스
  *
- * [성능]
- * - 외부 OCR API 사용 시 가장 느린 단계 중 하나
- * - 이미지 크기 / 품질에 따라 성능 차이 큼
+ * [Google Vision]
+ * - 일반 사진 OCR
+ * - 자연 이미지 OCR
+ *
+ * [Clova OCR]
+ * - 식단표 OCR
+ * - 문서 OCR
+ * - 표 구조 OCR
  *
  * [특징]
- * - 분석 파이프라인의 시작점
+ * - 분석 파이프라인 시작점
  * - MealService 입력 생성기 역할
- *
- * [성능 개선 포인트]
- * - 이미지 전처리 (resize / noise removal)
- * - OCR 결과 캐싱
  * =========================================
  */
 
 @Service
 public class OcrPicture {
 
-    private final String googleKey = "AIzaSyDHrF2H8RLss98zW6PEyGWcejp0pu9gr9g";
-    private final String googleUrl = "https://vision.googleapis.com/v1/images:annotate";
+    @Autowired
+    private ClovaOcrClient clovaOcrClient;
+
+    private final String googleKey =
+            "AIzaSyDHrF2H8RLss98zW6PEyGWcejp0pu9gr9g";
+
+    private final String googleUrl =
+            "https://vision.googleapis.com/v1/images:annotate";
 
     // =========================
-    // 1. 기본 OCR (Google Vision)
+    // 식단표 OCR (Clova)
     // =========================
-    public String extractText(MultipartFile file) {
-        return callGoogleVision(file);
+    public String extractMealText(MultipartFile file) {
+        return extractClovaText(file);
     }
 
+    // =========================
+    // 일반 사진 OCR (Google)
+    // =========================
+    public String extractPhotoText(MultipartFile file) {
+        return extractGoogleText(file);
+    }
+
+    // =========================
+    // 기존 호환용
+    // =========================
+    public String extractText(MultipartFile file) {
+        return extractMealText(file);
+    }
+
+    // =========================
+    // Google OCR
+    // =========================
     public String extractGoogleText(MultipartFile file) {
         return callGoogleVision(file);
     }
 
     // =========================
-    // 2. Google Vision 실제 처리
+    // Google Vision 실제 처리
     // =========================
     private String callGoogleVision(MultipartFile file) {
 
         try {
-            String base64 = Base64.getEncoder().encodeToString(file.getBytes());
 
-            URL apiUrl = new URL(googleUrl + "?key=" + googleKey);
-            HttpURLConnection conn = (HttpURLConnection) apiUrl.openConnection();
+            String base64 =
+                    Base64.getEncoder()
+                            .encodeToString(file.getBytes());
+
+            URL apiUrl =
+                    new URL(googleUrl + "?key=" + googleKey);
+
+            HttpURLConnection conn =
+                    (HttpURLConnection) apiUrl.openConnection();
 
             conn.setRequestMethod("POST");
-            conn.setRequestProperty("Content-Type", "application/json");
+
+            conn.setRequestProperty(
+                    "Content-Type",
+                    "application/json"
+            );
+
             conn.setDoOutput(true);
 
             String body = """
@@ -78,21 +112,32 @@ public class OcrPicture {
             """.formatted(base64);
 
             try (OutputStream os = conn.getOutputStream()) {
-                os.write(body.getBytes(StandardCharsets.UTF_8));
+
+                os.write(
+                        body.getBytes(StandardCharsets.UTF_8)
+                );
             }
 
-            BufferedReader br = new BufferedReader(
-                    new InputStreamReader(conn.getInputStream(), StandardCharsets.UTF_8)
-            );
+            BufferedReader br =
+                    new BufferedReader(
+                            new InputStreamReader(
+                                    conn.getInputStream(),
+                                    StandardCharsets.UTF_8
+                            )
+                    );
 
             StringBuilder sb = new StringBuilder();
+
             String line;
+
             while ((line = br.readLine()) != null) {
                 sb.append(line);
             }
 
             ObjectMapper mapper = new ObjectMapper();
-            JsonNode root = mapper.readTree(sb.toString());
+
+            JsonNode root =
+                    mapper.readTree(sb.toString());
 
             return root.path("responses")
                     .get(0)
@@ -101,16 +146,50 @@ public class OcrPicture {
                     .asText("");
 
         } catch (Exception e) {
+
             e.printStackTrace();
+
             return "";
         }
     }
 
     // =========================
-    // 3. Clova (임시 placeholder)
+    // Clova OCR
     // =========================
     public String extractClovaText(MultipartFile file) {
-        // 나중에 Clova API 연결
-        return "CLOVA_NOT_IMPLEMENTED";
+
+        try {
+
+            String response =
+                    clovaOcrClient.requestOcr(file);
+
+            ObjectMapper mapper = new ObjectMapper();
+
+            JsonNode root =
+                    mapper.readTree(response);
+
+            JsonNode fields =
+                    root.path("images")
+                            .get(0)
+                            .path("fields");
+
+            StringBuilder sb = new StringBuilder();
+
+            for (JsonNode field : fields) {
+
+                String text =
+                        field.path("inferText").asText();
+
+                sb.append(text).append("\n");
+            }
+
+            return sb.toString();
+
+        } catch (Exception e) {
+
+            e.printStackTrace();
+
+            return "";
+        }
     }
 }

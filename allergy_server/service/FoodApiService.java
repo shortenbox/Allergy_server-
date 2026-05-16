@@ -13,31 +13,8 @@ import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
-import java.util.LinkedHashMap;
 import java.util.Map;
-
-/**
- * =========================================
- * FoodApiService
- * =========================================
- * [역할]
- * - 식약처 COOKRCP01 API 호출
- * - 영양 정보 및 레시피 데이터 조회
- * - 알러지 DB 체크 보조 수행
- *
- * [성능]
- * - 외부 HTTP API 호출 → 가장 느린 구간 중 하나
- * - 네트워크 latency 영향 큼
- *
- * [특징]
- * - 외부 API 의존 서비스
- * - JSON/XML 파싱 처리 포함
- *
- * [성능 개선 포인트]
- * - API 응답 캐싱 (Redis 추천)
- * - 중복 요청 최소화 필요
- * =========================================
- */
+import java.util.concurrent.ConcurrentHashMap;
 
 @Service
 public class FoodApiService {
@@ -49,75 +26,99 @@ public class FoodApiService {
 
     private final DataSource dataSource;
 
+    // =========================
+    // 🔥 캐시 추가 (핵심)
+    // =========================
+
+    private final Map<String, Map<String, Object>> analyzeCache =
+            new ConcurrentHashMap<>();
+
+    private final Map<String, String> recipeCache =
+            new ConcurrentHashMap<>();
+
+    private final Map<String, String> allergyCache =
+            new ConcurrentHashMap<>();
+
     public FoodApiService(DataSource dataSource) {
         this.dataSource = dataSource;
     }
 
     // =========================
-    // 1. 영양 정보 + 알러지
+    // 1. 영양 정보 + 캐싱 적용
     // =========================
     public Map<String, Object> analyze(String foodName) {
 
-        Map<String, Object> result = new LinkedHashMap<>();
-
         if (foodName == null || foodName.isBlank()) {
-            result.put("foodName", "");
-            result.put("risk", "입력 없음");
-            return result;
+            return Map.of(
+                    "foodName", "",
+                    "risk", "입력 없음"
+            );
         }
 
         foodName = foodName.trim();
+
+        // 🔥 캐시 히트
+        if (analyzeCache.containsKey(foodName)) {
+            return analyzeCache.get(foodName);
+        }
+
+        Map<String, Object> result = new java.util.LinkedHashMap<>();
         result.put("foodName", foodName);
 
         try {
             String encoded = URLEncoder.encode(foodName, StandardCharsets.UTF_8);
 
             String urlStr =
-                    baseUrl
-                            + apiKey
-                            + "/COOKRCP01/json/1/5/RCP_NM="
-                            + encoded;
+                    baseUrl + apiKey +
+                            "/COOKRCP01/json/1/5/RCP_NM=" + encoded;
 
             String response = request(urlStr);
 
             if (!response.contains("RCP_NM")) {
-                result.put("risk", checkAllergy(foodName));
+
+                String risk = checkAllergy(foodName);
+
+                result.put("risk", risk);
+
+                analyzeCache.put(foodName, result);
                 return result;
             }
 
-            String sodium = extract(response, "INFO_NA");
-            String protein = extract(response, "INFO_PRO");
-            String fat = extract(response, "INFO_FAT");
-            String carb = extract(response, "INFO_CAR");
-
-            result.put("carbohydrate", carb);
-            result.put("protein", protein);
-            result.put("fat", fat);
-            result.put("sodium", sodium);
+            result.put("carbohydrate", extract(response, "INFO_CAR"));
+            result.put("protein", extract(response, "INFO_PRO"));
+            result.put("fat", extract(response, "INFO_FAT"));
+            result.put("sodium", extract(response, "INFO_NA"));
 
             result.put("risk", checkAllergy(foodName));
 
         } catch (Exception e) {
-            e.printStackTrace();
             result.put("risk", "안전");
         }
 
+        analyzeCache.put(foodName, result);
         return result;
     }
 
     // =========================
-    // 2. 재료 추출 (핵심)
+    // 2. 레시피 재료 + 캐싱
     // =========================
     public String getRecipeParts(String foodName) {
+
+        if (foodName == null || foodName.isBlank()) {
+            return "";
+        }
+
+        // 🔥 캐시 히트
+        if (recipeCache.containsKey(foodName)) {
+            return recipeCache.get(foodName);
+        }
 
         try {
             String encoded = URLEncoder.encode(foodName, StandardCharsets.UTF_8);
 
             String urlStr =
-                    baseUrl
-                            + apiKey
-                            + "/COOKRCP01/json/1/5/RCP_NM="
-                            + encoded;
+                    baseUrl + apiKey +
+                            "/COOKRCP01/json/1/5/RCP_NM=" + encoded;
 
             String response = request(urlStr);
 
@@ -127,21 +128,36 @@ public class FoodApiService {
             JsonNode row = root.path("COOKRCP01").path("row");
 
             if (!row.isArray() || row.size() == 0) {
+                recipeCache.put(foodName, "");
                 return "";
             }
 
-            return row.get(0).path("RCP_PARTS_DTLS").asText("");
+            String parts =
+                    row.get(0).path("RCP_PARTS_DTLS").asText("");
+
+            recipeCache.put(foodName, parts);
+
+            return parts;
 
         } catch (Exception e) {
-            e.printStackTrace();
+            recipeCache.put(foodName, "");
             return "";
         }
     }
 
     // =========================
-    // 3. 알러지 체크
+    // 3. 알러지 체크 + 캐싱
     // =========================
     public String checkAllergy(String foodName) {
+
+        if (foodName == null || foodName.isBlank()) {
+            return "안전";
+        }
+
+        // 🔥 캐시 히트
+        if (allergyCache.containsKey(foodName)) {
+            return allergyCache.get(foodName);
+        }
 
         try (Connection conn = dataSource.getConnection()) {
 
@@ -168,6 +184,7 @@ public class FoodApiService {
 
                 try (ResultSet rs = stmt.executeQuery()) {
                     if (rs.next()) {
+                        allergyCache.put(foodName, "위험");
                         return "위험";
                     }
                 }
@@ -177,11 +194,12 @@ public class FoodApiService {
             e.printStackTrace();
         }
 
+        allergyCache.put(foodName, "안전");
         return "안전";
     }
 
     // =========================
-    // 4. HTTP 요청
+    // HTTP 요청
     // =========================
     private String request(String urlStr) throws Exception {
 
@@ -202,7 +220,7 @@ public class FoodApiService {
     }
 
     // =========================
-    // 5. JSON extract (기존 방식 유지)
+    // JSON extract
     // =========================
     private String extract(String json, String key) {
 

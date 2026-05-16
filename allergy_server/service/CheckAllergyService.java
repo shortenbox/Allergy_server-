@@ -3,6 +3,7 @@ package com.example.allergy_server.service;
 import org.springframework.stereotype.Service;
 
 import java.sql.*;
+import java.util.List;
 
 /**
  * =========================================
@@ -28,10 +29,14 @@ import java.sql.*;
 @Service
 public class CheckAllergyService {
 
-    private final String dbUrl = "jdbc:mysql://localhost:3306/infant_meal_db?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Asia/Seoul";
+    private final String dbUrl =
+            "jdbc:mysql://localhost:3306/infant_meal_db?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Asia/Seoul";
     private final String dbUser = "root";
     private final String dbPassword = "1234";
 
+    // =========================
+    // 1. 단일 음식 검사 (기존 유지)
+    // =========================
     public String check(String foodName) {
 
         try (Connection conn =
@@ -39,6 +44,7 @@ public class CheckAllergyService {
 
             String standard = foodName;
 
+            // alias 변환
             String aliasSql =
                     "SELECT standard_name FROM ingredient_alias WHERE alias_name = ?";
 
@@ -51,6 +57,7 @@ public class CheckAllergyService {
                 }
             }
 
+            // 알러지 체크
             String sql =
                     "SELECT 1 FROM allergen_in WHERE allergen_name = ?";
 
@@ -65,6 +72,36 @@ public class CheckAllergyService {
 
         } catch (Exception e) {
             e.printStackTrace();
+        }
+
+        return "안전";
+    }
+
+    // =========================
+    // 2. 확장 버전 (ingredients 포함)
+    // =========================
+    public String check(String foodName, List<String> ingredients) {
+
+        System.out.println("CHECK FOOD = " + foodName);
+        System.out.println("CHECK INGREDIENTS = " + ingredients);
+
+        // 1. 음식 자체 검사
+        String result = check(foodName);
+
+        if ("위험".equals(result)) {
+            return "위험";
+        }
+
+        // 2. 재료 검사
+        if (ingredients != null) {
+            for (String ing : ingredients) {
+
+                String r = check(ing);
+
+                if ("위험".equals(r)) {
+                    return "위험";
+                }
+            }
         }
 
         return "안전";

@@ -5,30 +5,8 @@ import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.util.*;
-
-/**
- * =========================================
- * MealService
- * =========================================
- * [역할]
- * - 식단 분석 핵심 파이프라인
- *   OCR → 음식 추출 → alias → 영양 API → 재료 → 알러지 체크
- *
- * [성능]
- * - 가장 무거운 서비스 계층
- * - 외부 API + DB + OCR 호출 포함
- * - 병목 발생 가능 (네트워크 + DB + OCR)
- *
- * [특징]
- * - 시스템 “핵심 엔진”
- * - 모든 데이터 흐름 통합 담당
- *
- * [성능 개선 포인트]
- * - alias 캐싱 필요
- * - Food API 응답 캐싱 필요
- * - OCR 비동기 처리 가능
- * =========================================
- */
+import java.util.concurrent.*;
+import java.util.stream.Collectors;
 
 @Service
 public class MealService {
@@ -36,16 +14,20 @@ public class MealService {
     private final OcrPicture ocrPicture;
     private final FoodApiService foodApiService;
     private final CheckAllergyService checkAllergyService;
-    private final IngredientAliasService ingredientAliasService; // 🔥 추가
+    private final IngredientAliasService ingredientAliasService;
 
     // =========================
-    // 생성자
+    // 🔥 병렬 처리 스레드풀
     // =========================
-    public MealService(OcrPicture ocrPicture,
-                       FoodApiService foodApiService,
-                       CheckAllergyService checkAllergyService,
-                       IngredientAliasService ingredientAliasService) {
+    private final ExecutorService executor =
+            Executors.newFixedThreadPool(8);
 
+    public MealService(
+            OcrPicture ocrPicture,
+            FoodApiService foodApiService,
+            CheckAllergyService checkAllergyService,
+            IngredientAliasService ingredientAliasService
+    ) {
         this.ocrPicture = ocrPicture;
         this.foodApiService = foodApiService;
         this.checkAllergyService = checkAllergyService;
@@ -53,37 +35,53 @@ public class MealService {
     }
 
     // =========================
-    // 1. 텍스트 기반 분석 API
+    // 텍스트 분석 API
     // =========================
     public Map<String, Object> analyzeMeal(Map<String, String> meals) {
 
         Map<String, Object> result = new LinkedHashMap<>();
 
-        result.put("breakfast", analyzeOne(meals.get("breakfast")));
-        result.put("lunch", analyzeOne(meals.get("lunch")));
-        result.put("dinner", analyzeOne(meals.get("dinner")));
-        result.put("snack", analyzeOne(meals.get("snack")));
+        List<String> keys = List.of("breakfast", "lunch", "dinner", "snack");
+
+        for (String key : keys) {
+
+            String value = meals.get(key);
+
+            if (value == null || value.isBlank()) continue;
+
+            result.put(key, analyzeOne(value));
+        }
 
         return result;
     }
 
     // =========================
-    // 2. 이미지 기반 분석 API
+    // 이미지 분석 API (🔥 병렬 적용)
     // =========================
     public Map<String, Object> processImage(MultipartFile image) {
 
         Map<String, Object> result = new LinkedHashMap<>();
 
         try {
-            String ocrText = ocrPicture.extractText(image);
 
+            String ocrText = extractMealOcr(image);
             List<String> foods = extractFoods(ocrText);
 
-            Map<String, Object> analysis = new LinkedHashMap<>();
-
-            for (String food : foods) {
-                analysis.put(food, analyzeOne(food));
-            }
+            Map<String, Object> analysis =
+                    foods.stream()
+                            .map(food ->
+                                    CompletableFuture.supplyAsync(
+                                            () -> Map.entry(food, analyzeOne(food)),
+                                            executor
+                                    )
+                            )
+                            .map(CompletableFuture::join)
+                            .collect(Collectors.toMap(
+                                    Map.Entry::getKey,
+                                    Map.Entry::getValue,
+                                    (a, b) -> a,
+                                    LinkedHashMap::new
+                            ));
 
             result.put("ocrText", ocrText);
             result.put("foods", foods);
@@ -98,7 +96,33 @@ public class MealService {
     }
 
     // =========================
-    // 3. 핵심 분석 로직
+    // OCR 전략
+    // =========================
+    private String extractMealOcr(MultipartFile image) {
+
+        String clovaText = ocrPicture.extractMealText(image);
+
+        if (isMealTable(clovaText)) {
+            return clovaText;
+        }
+
+        return ocrPicture.extractGoogleText(image);
+    }
+
+    private boolean isMealTable(String text) {
+
+        if (text == null || text.isBlank()) return false;
+
+        return text.contains("조식")
+                || text.contains("중식")
+                || text.contains("석식")
+                || text.contains("월요일")
+                || text.contains("식단")
+                || text.contains("메뉴");
+    }
+
+    // =========================
+    // 핵심 분석
     // =========================
     private Map<String, Object> analyzeOne(String food) {
 
@@ -110,59 +134,56 @@ public class MealService {
             return item;
         }
 
-        // 🔥 1. 전처리 (핵심)
-        food = food.trim();
-        food = food.replaceAll("\\(.*?\\)", "");
+        food = food.trim().replaceAll("\\(.*?\\)", "");
 
-        System.out.println("RAW FOOD = " + food);
-
-        // 🔥 2. alias 변환
-        String standardFood = ingredientAliasService.convert(food);
-
-        System.out.println("STANDARD FOOD = " + standardFood);
+        String standardFood =
+                ingredientAliasService.convert(food);
 
         item.put("foodName", standardFood);
 
-        // 3. 영양 정보
-        item.putAll(foodApiService.analyze(standardFood));
+        item.putAll(
+                foodApiService.analyze(standardFood)
+        );
 
-        // 4. 재료
-        List<String> ingredients = extractIngredientsFromFood(standardFood);
+        List<String> ingredients =
+                extractIngredientsFromFood(standardFood);
+
         item.put("ingredients", ingredients);
 
-        // 5. 알러지 체크
-        String risk = checkAllergyService.check(standardFood);
+        String risk =
+                checkAllergyService.check(standardFood, ingredients);
+
         item.put("risk", risk);
 
         return item;
     }
 
-    // =========================
-    // 4. 재료 추출
-    // =========================
     private List<String> extractIngredientsFromFood(String food) {
 
         try {
-            String raw = foodApiService.getRecipeParts(food);
+
+            String raw =
+                    foodApiService.getRecipeParts(food);
 
             if (raw == null || raw.isBlank()) {
                 return List.of();
             }
 
             return Arrays.stream(raw.split("[,·\\n/]"))
+                    .map(s -> s.replaceAll("재료", ""))
+                    .map(s -> s.replaceAll("\\(.*?\\)", ""))
                     .map(String::trim)
                     .filter(s -> !s.isBlank())
                     .distinct()
                     .toList();
 
         } catch (Exception e) {
-            e.printStackTrace();
             return List.of();
         }
     }
 
     // =========================
-    // 5. OCR → 음식 추출
+    // OCR → 음식 추출
     // =========================
     private List<String> extractFoods(String text) {
 
@@ -170,18 +191,87 @@ public class MealService {
             return List.of();
         }
 
-        String[] tokens = text.split("\\s+");
+        String[] lines = text.split("\\n|·");
 
         List<String> foods = new ArrayList<>();
 
-        for (String t : tokens) {
-            String word = t.replaceAll("[^가-힣a-zA-Z]", "");
+        for (String line : lines) {
 
-            if (word.length() >= 2) {
-                foods.add(word);
+            line = normalizeLine(line);
+            if (line.isBlank()) continue;
+
+            if (isMealLabel(line)) continue;
+
+            if (line.contains("식단표")) continue;
+            if (line.contains("하루")) continue;
+            if (line.contains("균형")) continue;
+            if (line.contains("잡힌")) continue;
+            if (line.contains("보내세요")) continue;
+
+            if (isNoiseLine(line)) continue;
+
+            if (!foods.contains(line)) {
+                foods.add(line);
             }
         }
 
-        return new ArrayList<>(new LinkedHashSet<>(foods));
+        return foods;
+    }
+
+    // =========================
+    // 전처리
+    // =========================
+    private String normalizeLine(String line) {
+
+        if (line == null) return "";
+
+        line = line.trim();
+
+        line = line.replaceAll("[0-9()/.,~\\-]", "");
+        line = line.replaceAll("[^가-힣a-zA-Z\\s]", "");
+
+        line = line.replaceAll("\\d{1,3}(,\\d{3})?\\s*원", "");
+        line = line.replaceAll("\\d+\\s?(g|ml|kg|l|인분|개|조각|컵|개입)", "");
+        line = line.replaceAll("반\\s*개", "");
+
+        return line.trim();
+    }
+
+    private boolean isMealLabel(String line) {
+
+        if (line == null) return true;
+
+        line = line.replaceAll("\\s+", "");
+
+        return line.equals("아침")
+                || line.equals("점심")
+                || line.equals("저녁")
+                || line.equals("간식")
+                || line.equals("조식")
+                || line.equals("중식")
+                || line.equals("석식");
+    }
+
+    private boolean isNoiseLine(String line) {
+
+        if (line == null) return true;
+
+        return line.length() < 2
+                || line.contains("균형")
+                || line.contains("잡힌")
+                || line.contains("건강한")
+                || line.contains("하루")
+                || line.contains("보내세요")
+                || line.contains("식단")
+                || line.contains("메뉴")
+                || line.contains("구분")
+                || line.equals("플레인");
+    }
+
+    // =========================
+    // 호환용
+    // =========================
+    public String checkAllergyCompat(String food) {
+        return checkAllergyService.check(food, Collections.emptyList());
     }
 }
